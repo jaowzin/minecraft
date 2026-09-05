@@ -60,30 +60,91 @@ jobs:
           New-Item -ItemType Directory -Force -Path loader-build | Out-Null
           cl.exe /nologo /std:c++20 /EHsc /O2 /MT /Fe:loader-build\MineModLoader.exe loader\main.cpp
 
+      - name: Build true XRay resource pack
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path xray-pack | Out-Null
+
+          # Base block visibility table is MIT-licensed and explicitly targets Bedrock 1.21+/26.x.
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://raw.githubusercontent.com/LeoTermado/minecraft-pe-xray-resource-pack/main/blocks.json' `
+            -OutFile 'xray-pack\blocks.json'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://raw.githubusercontent.com/LeoTermado/minecraft-pe-xray-resource-pack/main/LICENSE' `
+            -OutFile 'xray-pack\LICENSE-XRAY-MIT.txt'
+
+          @'
+          {
+            "format_version": 2,
+            "header": {
+              "description": "Mine Mod True XRay - terrain visibility filter for Bedrock 1.21+/26.x",
+              "name": "Mine Mod True XRay",
+              "uuid": "b4c9158c-89e8-4f92-9f9a-0e6ebdfdb7f0",
+              "version": [1, 0, 0],
+              "min_engine_version": [1, 21, 0]
+            },
+            "modules": [
+              {
+                "description": "Hides common terrain while keeping ores and useful blocks visible.",
+                "type": "resources",
+                "uuid": "5ad13e0f-9f6b-4c1e-bb04-e605d732ef09",
+                "version": [1, 0, 0]
+              }
+            ]
+          }
+          '@ | Set-Content 'xray-pack\manifest.json' -Encoding utf8
+
+          @'
+          MINE MOD TRUE XRAY
+
+          The block visibility table in this resource pack is derived from:
+          https://github.com/LeoTermado/minecraft-pe-xray-resource-pack
+          Copyright (c) 2025 Leo Termado
+          License: MIT (see LICENSE-XRAY-MIT.txt)
+
+          Mine Mod changes the pack name/manifest only. The pack hides common classic terrain
+          such as stone, deepslate and dirt while leaving ores and many useful blocks visible.
+          '@ | Set-Content 'xray-pack\MINE_MOD_XRAY_NOTICE.txt' -Encoding utf8
+
+          Compress-Archive -Path xray-pack\* -DestinationPath MineMod-XRay.zip -CompressionLevel Optimal
+          Move-Item MineMod-XRay.zip MineMod-XRay.mcpack
+
       - name: Package binary and corresponding source
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path package | Out-Null
           Copy-Item upstream-necromancer\out\build\x64-release\MineMod.dll package\MineMod.dll
           Copy-Item loader-build\MineModLoader.exe package\MineModLoader.exe
+          Copy-Item MineMod-XRay.mcpack package\MineMod-XRay.mcpack
           Copy-Item upstream-necromancer\LICENSE package\LICENSE-GPLv3.txt
           Copy-Item upstream-necromancer\MINE_MOD_NOTICES.txt package\MINE_MOD_NOTICES.txt
+          Copy-Item xray-pack\LICENSE-XRAY-MIT.txt package\LICENSE-XRAY-MIT.txt
 
           @'
           MINE MOD SLIM
 
           Target: Minecraft Bedrock Windows
-          Base: Necromancer Client GPLv3, pinned commit f79d241d42951259dd4849a9f1b9dd12c4ea20b2
+          Base client: Necromancer Client GPLv3, pinned commit f79d241d42951259dd4849a9f1b9dd12c4ea20b2
 
-          Usage:
+          TRUE XRAY MODE (visual like an XRay texture pack):
+          1. Double-click MineMod-XRay.mcpack once and let Minecraft import it.
+          2. In Minecraft: Settings -> Global Resources -> My Packs -> Mine Mod True XRay -> Activate.
+          3. Enter/re-enter the world so terrain chunks rebuild with the XRay pack.
+          4. Run MineModLoader.exe.
+          5. Press Insert/F10 and use Block ESP for extra selected blocks/colors if desired.
+
+          The True XRay resource pack hides common terrain and keeps ores/useful blocks visible
+          with their normal block textures. Block ESP remains available as an additional overlay.
+
+          Normal client usage:
           1. Start Minecraft and enter a world.
           2. Run MineModLoader.exe from this folder.
           3. Press Insert or F10 in Minecraft to open the menu.
           4. Visuals -> Block ESP is the only registered module.
-          5. Open Block ESP settings to choose ores/blocks, colors, thickness, scan delay and max blocks.
+          5. Open Block ESP settings to choose blocks, colors, thickness, scan delay and max blocks.
           6. Close the menu after choosing blocks; projected BlockESP boxes are drawn in gameplay.
 
-          This slim build does not register the upstream combat, movement, Anti OBS or automation modules.
+          This slim build does not register upstream combat, movement, Anti OBS or automation modules.
           '@ | Set-Content package\README-MINEMOD.txt -Encoding utf8
 
           # Corresponding modified source, excluding generated build output and Git metadata.
