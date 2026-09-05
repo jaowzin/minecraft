@@ -96,6 +96,53 @@ Replace-Literal -Path $blockEsp `
     -Old "void BlockESP::onRenderOverlay(Event&) {`r`n    if (!AntiObs::isActive()) return;" `
     -New "void BlockESP::onRenderOverlay(Event&) {"
 
+# The upstream scan identifies each block by dereferencing Block::legacyBlock and
+# reading BlockLegacy::namespacedId. The Block layout changed in 1.26.4501.0, so that
+# stale field is the likely access violation that happens immediately after adding a
+# block (the scan starts as soon as entries becomes non-empty). For Mine Mod, the
+# picker catalog has already resolved stable Block state pointers. Match those pointer
+# identities instead, which avoids dereferencing the stale Block layout entirely.
+Replace-Regex -Path $blockEsp `
+    -Pattern '                    int idx;\s+                    auto it = blockLookup\.find\(block\);\s+                    if \(it == blockLookup\.end\(\)\) \{\s+                        idx = -1;\s+                        auto legacy = block->legacyBlock;\s+                        if \(legacy\) \{.*?                        \}\s+                        if \(blockLookup\.size\(\) >= blockLookupCap\) blockLookup\.clear\(\);\s+                        blockLookup\.emplace\(block, idx\);\s+                    \} else \{\s+                        idx = it->second;\s+                    \}' `
+    -Replacement @'
+                    int idx;
+                    auto it = blockLookup.find(block);
+                    if (it == blockLookup.end()) {
+                        idx = -1;
+
+                        // Mine Mod Slim: no Block::legacyBlock dereference here.
+                        // The picker catalog's state pointer is already validated enough
+                        // to render its icon; use that same pointer as the scan key.
+                        for (auto const& cat : catalog) {
+                            if (cat.block != block) continue;
+                            for (size_t i = 0; i < entries.size(); i++) {
+                                if (entries[i]->id == cat.id) {
+                                    idx = static_cast<int>(i);
+                                    break;
+                                }
+                            }
+                            if (idx >= 0) break;
+                        }
+
+                        if (blockLookup.size() >= blockLookupCap) blockLookup.clear();
+                        blockLookup.emplace(block, idx);
+                    } else {
+                        idx = it->second;
+                    }
+'@
+
+# A persisted block list may start scanning before the picker has ever been opened in
+# this session. Build the safe catalog once before scanning so pointer matching works.
+Replace-Literal -Path $blockEsp `
+    -Old "    if (!lp || !region) return;`r`n`r`n    Vec3 p = lp->getPos();" `
+    -New "    if (!lp || !region) return;`r`n`r`n    if (catalog.empty()) rebuildCatalog();`r`n    if (catalog.empty()) return;`r`n`r`n    Vec3 p = lp->getPos();"
+
+# Reduce the default scan radius a little while we stabilize this exact build. The
+# scanner is time-budgeted already; this mainly shortens a full sweep after edits.
+Replace-Literal -Path $blockEsp `
+    -Old '    constexpr int scanRadius = 96;' `
+    -New '    constexpr int scanRadius = 48;'
+
 # Rename the produced DLL without renaming internal upstream classes/namespaces.
 $cmakeText = Get-Content -LiteralPath $cmake -Raw
 $cmakeText = $cmakeText.Replace('OUTPUT_NAME_RELEASE "Necromancer${NECROMANCER_NAME_SUFFIX}"', 'OUTPUT_NAME_RELEASE "MineMod"')
@@ -117,6 +164,8 @@ Changes made by this patcher:
 - RenderMaterialGroup::common is not a required startup signature.
 - BlockESP renders through the normal D2D projected overlay instead of the native 3D material path.
 - Projection frame state is captured without enabling AntiObs.
+- Block scanning identifies selected states by catalog pointer instead of stale Block::legacyBlock layout.
+- Default scan radius is reduced to 48 blocks while stabilizing Bedrock 1.26.4501.0.
 
 No anti-cheat bypass, stealth, Anti OBS, combat, movement or automation module is registered.
 '@ | Set-Content -LiteralPath (Join-Path $SourceDir 'MINE_MOD_NOTICES.txt') -Encoding utf8
