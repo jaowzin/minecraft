@@ -1,0 +1,12 @@
+# MINE MOD XRay - blocks that remain visible
+# One lowercase substring per line. Lines beginning with # are ignored.
+# Examples: "ore" keeps every ore; "diamond_ore" keeps only diamond ore variants.
+
+ore
+ancient_debris
+lava
+water
+chest
+spawner
+amethyst
+vault
