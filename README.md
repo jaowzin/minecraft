@@ -17,7 +17,11 @@ Output: `build/Release/BedrockScanner.exe`
 
 ### GitHub Actions
 
-Every push to `main` builds a Windows x64 release artifact named `BedrockScanner-win64`.
+Every push to `main` builds a Windows x64 artifact named `BedrockScanner-win64` containing:
+
+- `BedrockScanner.exe`
+- `probe-v2645.ps1`
+- this README
 
 ## Usage
 
@@ -30,6 +34,18 @@ BedrockScanner.exe --pattern "48 8B 0D ? ? ? ?" --section .text --rip 3 7
 
 `--rip <dispOffset> <instructionSize>` resolves a 32-bit RIP-relative displacement from each match.
 
+## v26.45 probe
+
+1. Open Minecraft Bedrock v26.45 and enter a world.
+2. Keep `BedrockScanner.exe` and `probe-v2645.ps1` in the same folder.
+3. Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\probe-v2645.ps1
+```
+
+The script tests a small set of **candidate** Bedrock signatures and creates `scan-report-v26.45.txt`. These signatures are probes, not trusted offsets; matches need to be validated on the exact game build before they are used.
+
 ## Next step for the XRay
 
-Run this build while Bedrock v26.45 is open and capture the scanner output. Once we have validated signatures for the runtime structures (camera/player/world/chunks), they can be moved into a versioned signature table instead of hard-coded absolute addresses.
+Use the v26.45 report to validate anchors for player/level/dimension/block access. Once stable runtime anchors are confirmed, move them into a versioned signature table and then implement the external world/chunk reader and overlay. Avoid hard-coded absolute addresses so ASLR and small game updates do not immediately break the scanner.
