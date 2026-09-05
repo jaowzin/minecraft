@@ -6,6 +6,7 @@ on:
     branches: [ main ]
     paths:
       - 'tools/make-mine-mod-slim.ps1'
+      - 'tools/fix-blockesp-runtime-match.ps1'
       - 'loader/**'
       - '.github/workflows/build-slim.yml'
 
@@ -41,6 +42,7 @@ jobs:
         shell: pwsh
         run: |
           ./tools/make-mine-mod-slim.ps1 -SourceDir upstream-necromancer
+          ./tools/fix-blockesp-runtime-match.ps1 -SourceDir upstream-necromancer
 
       - name: Configure upstream Release build
         shell: pwsh
@@ -79,6 +81,7 @@ jobs:
           3. Press Insert or F10 in Minecraft to open the menu.
           4. Visuals -> Block ESP is the only registered module.
           5. Open Block ESP settings to choose ores/blocks, colors, thickness, scan delay and max blocks.
+          6. Close the menu after choosing blocks; projected BlockESP boxes are drawn in gameplay.
 
           This slim build does not register the upstream combat, movement, Anti OBS or automation modules.
           '@ | Set-Content package\README-MINEMOD.txt -Encoding utf8
