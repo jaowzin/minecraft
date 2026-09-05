@@ -1,0 +1,106 @@
+name: Build MineMod Slim
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'tools/make-mine-mod-slim.ps1'
+      - 'loader/**'
+      - '.github/workflows/build-slim.yml'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout Mine Mod repo
+        uses: actions/checkout@v4
+
+      - name: Enable MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install MinGW binutils for resource embedding
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-binutils
+
+      - name: Add MinGW binutils to PATH
+        shell: pwsh
+        run: |
+          'C:\msys64\mingw64\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (-not (Test-Path 'C:\msys64\mingw64\bin\ld.exe')) {
+            throw 'ld.exe was not installed by MSYS2 setup.'
+          }
+
+      - name: Clone pinned Necromancer source
+        shell: pwsh
+        run: |
+          git clone https://github.com/asdasfxcvxcvcb/necromancer-minecraft-bedrock.git upstream-necromancer
+          Set-Location upstream-necromancer
+          git checkout f79d241d42951259dd4849a9f1b9dd12c4ea20b2
+          git submodule update --init --recursive
+
+      - name: Apply Mine Mod slim patches
+        shell: pwsh
+        run: |
+          ./tools/make-mine-mod-slim.ps1 -SourceDir upstream-necromancer
+
+      - name: Configure upstream Release build
+        shell: pwsh
+        working-directory: upstream-necromancer
+        run: cmake --preset x64-release
+
+      - name: Build MineMod.dll
+        shell: pwsh
+        working-directory: upstream-necromancer
+        run: cmake --build out/build/x64-release --parallel
+
+      - name: Build simple loader
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path loader-build | Out-Null
+          cl.exe /nologo /std:c++20 /EHsc /O2 /MT /Fe:loader-build\MineModLoader.exe loader\main.cpp
+
+      - name: Package binary and corresponding source
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item upstream-necromancer\out\build\x64-release\MineMod.dll package\MineMod.dll
+          Copy-Item loader-build\MineModLoader.exe package\MineModLoader.exe
+          Copy-Item upstream-necromancer\LICENSE package\LICENSE-GPLv3.txt
+          Copy-Item upstream-necromancer\MINE_MOD_NOTICES.txt package\MINE_MOD_NOTICES.txt
+
+          @'
+          MINE MOD SLIM
+
+          Target: Minecraft Bedrock Windows
+          Base: Necromancer Client GPLv3, pinned commit f79d241d42951259dd4849a9f1b9dd12c4ea20b2
+
+          Usage:
+          1. Start Minecraft and enter a world.
+          2. Run MineModLoader.exe from this folder.
+          3. Press Insert or F10 in Minecraft to open the menu.
+          4. Visuals -> Block ESP is the only registered module.
+          5. Open Block ESP settings to choose ores/blocks, colors, thickness, scan delay and max blocks.
+
+          This slim build does not register the upstream combat, movement, Anti OBS or automation modules.
+          '@ | Set-Content package\README-MINEMOD.txt -Encoding utf8
+
+          # Corresponding modified source, excluding generated build output and Git metadata.
+          Remove-Item -Recurse -Force upstream-necromancer\out -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force upstream-necromancer\.git -ErrorAction SilentlyContinue
+          Compress-Archive -Path upstream-necromancer\* -DestinationPath package\MineMod-source.zip -CompressionLevel Optimal
+
+      - name: Upload Mine Mod Slim
+        uses: actions/upload-artifact@v4
+        with:
+          name: MineMod-Slim-win64
+          path: package/*
+          if-no-files-found: error
