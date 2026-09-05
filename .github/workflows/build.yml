@@ -26,6 +26,7 @@ jobs:
           Copy-Item build/Release/MineMod.dll package/MineMod.dll
           Copy-Item build/Release/MineModLoader.exe package/MineModLoader.exe
           Copy-Item tools/probe-v2645.ps1 package/probe-v2645.ps1
+          Copy-Item xray-blocks.txt package/xray-blocks.txt
           Copy-Item README.md package/README.md
 
       - name: Upload package
