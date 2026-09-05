@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <optional>
@@ -18,24 +19,43 @@ struct Options {
     std::optional<std::string> pattern;
     std::optional<std::size_t> ripDispOffset;
     std::optional<std::size_t> ripInstructionSize;
+    std::optional<std::uintptr_t> pointerValue;
+    std::optional<std::uintptr_t> dumpAddress;
+    std::optional<std::size_t> dumpSize;
+    std::optional<std::uintptr_t> vtableAddress;
+    std::optional<std::size_t> vtableIndex;
+    std::size_t limit = 128;
     bool help = false;
 };
 
+std::optional<std::uintptr_t> parseAddress(const char* text) {
+    try {
+        return static_cast<std::uintptr_t>(std::stoull(text, nullptr, 0));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 void printUsage() {
     std::cout
-        << "BedrockScanner - external read-only AOB scanner\n\n"
+        << "BedrockScanner - external read-only Bedrock discovery tool\n\n"
         << "Usage:\n"
         << "  BedrockScanner.exe\n"
-        << "  BedrockScanner.exe --pattern \"48 8B 0D ? ? ? ? 48 85 C9\"\n"
-        << "  BedrockScanner.exe --pattern \"48 8B 0D ? ? ? ?\" --rip 3 7\n\n"
+        << "  BedrockScanner.exe --pattern \"48 8B 0D ? ? ? ?\" --rip 3 7\n"
+        << "  BedrockScanner.exe --pointer 0x7FF600001000\n"
+        << "  BedrockScanner.exe --dump 0x7FF600001000 96\n"
+        << "  BedrockScanner.exe --vslot 0x7FF600001000 0x1F\n\n"
         << "Options:\n"
         << "  --process <exe>          Target process (default Minecraft.Windows.exe)\n"
         << "  --module <exe>           Module to scan (default Minecraft.Windows.exe)\n"
-        << "  --section <name>         PE section to scan (default .text)\n"
+        << "  --section <name>         PE section for AOB scan (default .text)\n"
         << "  --pattern <AOB>          Hex bytes separated by spaces; ? or ?? = wildcard\n"
         << "  --rip <dispOff> <size>   Resolve signed disp32 relative to instruction end\n"
-        << "  --help                    Show this message\n\n"
-        << "With no --pattern the tool prints PID, module information and PE sections.\n";
+        << "  --pointer <address>      Find aligned copies of a pointer in writable committed memory\n"
+        << "  --dump <address> <size>  Hex-dump remote memory\n"
+        << "  --vslot <vtable> <idx>   Read a vtable function pointer and dump its first 96 bytes\n"
+        << "  --limit <n>              Maximum pointer matches printed (default 128)\n"
+        << "  --help                   Show this message\n";
 }
 
 std::optional<Options> parseArgs(int argc, char** argv) {
@@ -43,7 +63,6 @@ std::optional<Options> parseArgs(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-
         auto requireValue = [&](const char* name) -> const char* {
             if (i + 1 >= argc) {
                 std::cerr << "Missing value for " << name << "\n";
@@ -82,6 +101,53 @@ std::optional<Options> parseArgs(int argc, char** argv) {
                 std::cerr << "Invalid numeric arguments for --rip\n";
                 return std::nullopt;
             }
+        } else if (arg == "--pointer") {
+            const char* value = requireValue("--pointer");
+            if (!value) return std::nullopt;
+            options.pointerValue = parseAddress(value);
+            if (!options.pointerValue) {
+                std::cerr << "Invalid pointer address\n";
+                return std::nullopt;
+            }
+        } else if (arg == "--dump") {
+            if (i + 2 >= argc) {
+                std::cerr << "--dump needs <address> <size>\n";
+                return std::nullopt;
+            }
+            options.dumpAddress = parseAddress(argv[++i]);
+            try {
+                options.dumpSize = static_cast<std::size_t>(std::stoull(argv[++i], nullptr, 0));
+            } catch (...) {
+                options.dumpSize.reset();
+            }
+            if (!options.dumpAddress || !options.dumpSize || *options.dumpSize == 0 || *options.dumpSize > 4096) {
+                std::cerr << "Invalid --dump arguments (size must be 1..4096)\n";
+                return std::nullopt;
+            }
+        } else if (arg == "--vslot") {
+            if (i + 2 >= argc) {
+                std::cerr << "--vslot needs <vtable> <index>\n";
+                return std::nullopt;
+            }
+            options.vtableAddress = parseAddress(argv[++i]);
+            try {
+                options.vtableIndex = static_cast<std::size_t>(std::stoull(argv[++i], nullptr, 0));
+            } catch (...) {
+                options.vtableIndex.reset();
+            }
+            if (!options.vtableAddress || !options.vtableIndex) {
+                std::cerr << "Invalid --vslot arguments\n";
+                return std::nullopt;
+            }
+        } else if (arg == "--limit") {
+            const char* value = requireValue("--limit");
+            if (!value) return std::nullopt;
+            try {
+                options.limit = static_cast<std::size_t>(std::stoull(value, nullptr, 0));
+            } catch (...) {
+                return std::nullopt;
+            }
+            if (options.limit == 0 || options.limit > 4096) options.limit = 128;
         } else {
             std::cerr << "Unknown argument: " << arg << "\n";
             return std::nullopt;
@@ -130,12 +196,9 @@ std::vector<std::uintptr_t> scanRemoteSection(
 
         const auto localMatches = findPatternMatches(scanBuffer, pattern);
         const std::uintptr_t bufferBase = section.address + offset - tail.size();
-
         for (const auto local : localMatches) {
             const auto absolute = bufferBase + local;
-            if (results.empty() || results.back() != absolute) {
-                results.push_back(absolute);
-            }
+            if (results.empty() || results.back() != absolute) results.push_back(absolute);
         }
 
         const std::size_t keep = pattern.size() > 1
@@ -144,12 +207,82 @@ std::vector<std::uintptr_t> scanRemoteSection(
         tail.assign(scanBuffer.end() - static_cast<std::ptrdiff_t>(keep), scanBuffer.end());
         offset += toRead;
     }
+    return results;
+}
 
+bool isWritableProtection(DWORD protect) {
+    if ((protect & PAGE_GUARD) || (protect & PAGE_NOACCESS)) return false;
+    const DWORD base = protect & 0xFF;
+    return base == PAGE_READWRITE
+        || base == PAGE_WRITECOPY
+        || base == PAGE_EXECUTE_READWRITE
+        || base == PAGE_EXECUTE_WRITECOPY;
+}
+
+std::vector<std::uintptr_t> scanWritablePointer(
+    const RemoteProcess& process,
+    std::uintptr_t target,
+    std::size_t limit
+) {
+    std::vector<std::uintptr_t> results;
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    auto cursor = reinterpret_cast<std::uintptr_t>(si.lpMinimumApplicationAddress);
+    const auto maxAddress = reinterpret_cast<std::uintptr_t>(si.lpMaximumApplicationAddress);
+    constexpr std::size_t chunkSize = 1024 * 1024;
+
+    while (cursor < maxAddress && results.size() < limit) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQueryEx(process.handle(), reinterpret_cast<LPCVOID>(cursor), &mbi, sizeof(mbi)) == 0) break;
+
+        const auto regionBase = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+        const auto regionSize = static_cast<std::size_t>(mbi.RegionSize);
+        if (mbi.State == MEM_COMMIT && isWritableProtection(mbi.Protect) && regionSize >= sizeof(std::uintptr_t)) {
+            std::size_t offset = 0;
+            while (offset < regionSize && results.size() < limit) {
+                const auto toRead = std::min(chunkSize, regionSize - offset);
+                auto bytes = process.readBytes(regionBase + offset, toRead);
+                if (!bytes.empty()) {
+                    const auto absoluteBase = regionBase + offset;
+                    std::size_t i = static_cast<std::size_t>((8 - (absoluteBase & 7)) & 7);
+                    for (; i + sizeof(std::uintptr_t) <= bytes.size() && results.size() < limit; i += 8) {
+                        std::uintptr_t value{};
+                        std::memcpy(&value, bytes.data() + i, sizeof(value));
+                        if (value == target) results.push_back(absoluteBase + i);
+                    }
+                }
+                offset += toRead;
+            }
+        }
+
+        const auto next = regionBase + regionSize;
+        if (next <= cursor) break;
+        cursor = next;
+    }
     return results;
 }
 
 void printHexAddress(std::uintptr_t value) {
     std::cout << "0x" << std::hex << std::uppercase << value << std::dec;
+}
+
+void dumpBytes(const RemoteProcess& process, std::uintptr_t address, std::size_t size) {
+    const auto bytes = process.readBytes(address, size);
+    if (bytes.empty()) {
+        std::cout << "[-] Could not read requested memory.\n";
+        return;
+    }
+
+    for (std::size_t i = 0; i < bytes.size(); i += 16) {
+        printHexAddress(address + i);
+        std::cout << "  ";
+        const auto row = std::min<std::size_t>(16, bytes.size() - i);
+        for (std::size_t j = 0; j < row; ++j) {
+            std::cout << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
+                      << static_cast<unsigned>(bytes[i + j]) << ' ';
+        }
+        std::cout << std::setfill(' ') << std::dec << "\n";
+    }
 }
 
 } // namespace
@@ -173,7 +306,6 @@ int main(int argc, char** argv) {
         std::cerr << "[-] Could not attach. Open Minecraft Bedrock first and try again.\n";
         return 1;
     }
-
     std::cout << "[+] PID: " << process.pid() << "\n";
 
     const auto module = process.findModule(options.moduleName);
@@ -184,8 +316,7 @@ int main(int argc, char** argv) {
 
     std::cout << "[+] Module: " << narrow(module->name) << "\n";
     std::cout << "[+] Path:   " << narrow(module->path) << "\n";
-    std::cout << "[+] Base:   ";
-    printHexAddress(module->base);
+    std::cout << "[+] Base:   "; printHexAddress(module->base);
     std::cout << "\n[+] Size:   0x" << std::hex << std::uppercase << module->size << std::dec << " bytes\n";
 
     const auto sections = process.enumerateSections(*module);
@@ -205,8 +336,46 @@ int main(int argc, char** argv) {
                   << " size=0x" << section.virtualSize << std::dec << "\n";
     }
 
+    if (options.dumpAddress && options.dumpSize) {
+        std::cout << "\n[+] Dumping "; printHexAddress(*options.dumpAddress);
+        std::cout << " size=" << *options.dumpSize << "\n";
+        dumpBytes(process, *options.dumpAddress, *options.dumpSize);
+        return 0;
+    }
+
+    if (options.vtableAddress && options.vtableIndex) {
+        const auto slotAddress = *options.vtableAddress + (*options.vtableIndex * sizeof(std::uintptr_t));
+        const auto function = process.readValue<std::uintptr_t>(slotAddress);
+        std::cout << "\n[+] VTable="; printHexAddress(*options.vtableAddress);
+        std::cout << " index=0x" << std::hex << std::uppercase << *options.vtableIndex << std::dec;
+        std::cout << " slot="; printHexAddress(slotAddress);
+        if (!function || *function == 0) {
+            std::cout << " function=<read failed>\n";
+            return 3;
+        }
+        std::cout << " function="; printHexAddress(*function);
+        if (*function >= module->base && *function < module->base + module->size) {
+            std::cout << " (RVA=0x" << std::hex << std::uppercase << (*function - module->base) << std::dec << ")";
+        }
+        std::cout << "\n[+] First 96 function bytes:\n";
+        dumpBytes(process, *function, 96);
+        return 0;
+    }
+
+    if (options.pointerValue) {
+        std::cout << "\n[+] Scanning writable committed memory for aligned pointer ";
+        printHexAddress(*options.pointerValue);
+        std::cout << " ...\n";
+        const auto hits = scanWritablePointer(process, *options.pointerValue, options.limit);
+        std::cout << "[+] Pointer matches (capped at " << options.limit << "): " << hits.size() << "\n";
+        for (std::size_t i = 0; i < hits.size(); ++i) {
+            std::cout << "  [" << i << "] "; printHexAddress(hits[i]); std::cout << "\n";
+        }
+        return hits.empty() ? 3 : 0;
+    }
+
     if (!options.pattern) {
-        std::cout << "\n[+] Ready. Pass --pattern to scan a section.\n";
+        std::cout << "\n[+] Ready. Pass --pattern, --pointer, --dump or --vslot.\n";
         return 0;
     }
 
@@ -231,8 +400,7 @@ int main(int argc, char** argv) {
 
     for (std::size_t i = 0; i < matches.size(); ++i) {
         const auto match = matches[i];
-        std::cout << "  [" << i << "] VA=";
-        printHexAddress(match);
+        std::cout << "  [" << i << "] VA="; printHexAddress(match);
         std::cout << " RVA=0x" << std::hex << std::uppercase << (match - module->base) << std::dec;
 
         if (options.ripDispOffset && options.ripInstructionSize) {
@@ -242,8 +410,7 @@ int main(int argc, char** argv) {
                     static_cast<std::intptr_t>(match + *options.ripInstructionSize)
                     + static_cast<std::intptr_t>(*displacement)
                 );
-                std::cout << " RIP_TARGET=";
-                printHexAddress(target);
+                std::cout << " RIP_TARGET="; printHexAddress(target);
                 if (target >= module->base && target < module->base + module->size) {
                     std::cout << " (RVA=0x" << std::hex << std::uppercase << (target - module->base) << std::dec << ")";
                 }
@@ -251,7 +418,6 @@ int main(int argc, char** argv) {
                 std::cout << " RIP_TARGET=<read failed>";
             }
         }
-
         std::cout << "\n";
     }
 
