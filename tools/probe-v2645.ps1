@@ -6,8 +6,8 @@ if (-not (Test-Path $scanner)) {
     exit 1
 }
 
-$report = Join-Path $PSScriptRoot 'scan-report-v26.45-v3.txt'
-"Bedrock v26.45 discovery report v3 - $(Get-Date -Format o)" | Set-Content $report
+$report = Join-Path $PSScriptRoot 'scan-report-v26.45-v4.txt'
+"Bedrock v26.45 discovery report v4 - $(Get-Date -Format o)" | Set-Content $report
 
 function Hex([UInt64]$value) {
     return ('0x{0:X}' -f $value)
@@ -26,10 +26,7 @@ function Run-Scanner {
 }
 
 function Resolve-VTable {
-    param(
-        [string]$Name,
-        [string]$Pattern
-    )
+    param([string]$Name, [string]$Pattern)
 
     $header = "`n===== $Name ====="
     Write-Host $header -ForegroundColor Cyan
@@ -47,33 +44,52 @@ function Resolve-VTable {
     return $value
 }
 
-function Find-LiveObject {
+function Find-PointerRefs {
     param(
-        [string]$Name,
-        [UInt64]$VTable
+        [UInt64]$Target,
+        [int]$Limit = 128,
+        [string]$Label = ''
     )
 
-    $header = "`n===== live $Name objects ====="
-    Write-Host $header -ForegroundColor Cyan
-    $header | Add-Content $report
+    if ($Label) {
+        "`n===== $Label =====" | Add-Content $report
+        Write-Host "`n[+] $Label" -ForegroundColor Cyan
+    }
 
-    $output = Run-Scanner @('--pointer', (Hex $VTable), '--limit', '64')
+    $output = Run-Scanner @('--pointer', (Hex $Target), '--limit', $Limit.ToString()) -Quiet
     $matches = [regex]::Matches($output, '(?m)^\s+\[\d+\]\s+(0x[0-9A-Fa-f]+)\s*$')
-    if ($matches.Count -eq 0) {
-        Write-Host "[-] No live $Name object found by first-vtable-pointer scan." -ForegroundColor Yellow
+    $result = New-Object System.Collections.Generic.List[UInt64]
+    foreach ($m in $matches) {
+        $result.Add([Convert]::ToUInt64($m.Groups[1].Value.Substring(2), 16))
+    }
+
+    $line = "[+] refs($(Hex $Target)) = $($result.Count)"
+    Write-Host $line
+    $line | Add-Content $report
+    foreach ($v in $result) {
+        $entry = "    $(Hex $v)"
+        Write-Host $entry
+        $entry | Add-Content $report
+    }
+    return $result.ToArray()
+}
+
+function Find-LiveObject {
+    param([string]$Name, [UInt64]$VTable)
+
+    $refs = Find-PointerRefs $VTable 64 "live $Name objects (first pointer == vtable)"
+    if ($refs.Count -eq 0) {
+        Write-Host "[-] No live $Name object found by exact-vtable scan." -ForegroundColor Yellow
         return $null
     }
 
-    $value = [Convert]::ToUInt64($matches[0].Groups[1].Value.Substring(2), 16)
+    $value = [UInt64]$refs[0]
     Write-Host "[+] $Name object = $(Hex $value)" -ForegroundColor Green
     return $value
 }
 
 function Read-RemoteBytes {
-    param(
-        [UInt64]$Address,
-        [int]$Count
-    )
+    param([UInt64]$Address, [int]$Count)
 
     $output = Run-Scanner @('--dump', (Hex $Address), $Count.ToString()) -Quiet
     $result = New-Object System.Collections.Generic.List[byte]
@@ -107,20 +123,21 @@ function Read-RemoteByte {
     return [byte]$bytes[0]
 }
 
-function Print-PtrField {
-    param(
-        [string]$Owner,
-        [UInt64]$Base,
-        [UInt64]$Offset,
-        [string]$Name
-    )
+function Is-ReadableAddress {
+    param([UInt64]$Address)
+    if ($Address -eq 0) { return $false }
+    return $null -ne (Read-RemoteBytes $Address 1)
+}
 
-    $address = $Base + $Offset
-    $value = Read-RemotePtr $address
+function Print-PtrField {
+    param([string]$Owner, [UInt64]$Base, [UInt64]$Offset, [string]$Name)
+
+    $value = Read-RemotePtr ($Base + $Offset)
     if ($null -eq $value) {
         $line = "[-] $Owner+$('{0:X}' -f $Offset) $Name = <read failed>"
     } else {
-        $line = "[+] $Owner+$('{0:X}' -f $Offset) $Name = $(Hex $value)"
+        $readable = Is-ReadableAddress $value
+        $line = "[+] $Owner+$('{0:X}' -f $Offset) $Name = $(Hex $value) readable=$readable"
     }
     Write-Host $line
     $line | Add-Content $report
@@ -130,7 +147,7 @@ function Print-PtrField {
 Write-Host "[+] Capturing module/section fingerprint..."
 Run-Scanner @() | Out-Null
 
-# Anchors verified to match the user's 1.26.4501.0 build in the v2 run.
+# Anchors verified on the user's exact 1.26.4501.0 binary.
 $clientVtablePattern = '48 8D 05 ?? ?? ?? ?? 49 89 45 00 48 8D 05 ?? ?? ?? ?? 49 89 45 18 48 8D 05 ?? ?? ?? ?? 49 89 85 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 49 89 85 ?? ?? ?? ??'
 $levelVtablePattern  = '48 8D 05 ?? ?? ?? ?? 48 89 07 48 8D 05 ?? ?? ?? ?? 48 89 47 18 48 8D 05 ?? ?? ?? ?? 48 89 BD ?? ?? ?? ?? 48 89 47 20'
 $localVtablePattern  = '48 8D 05 ?? ?? ?? ?? 48 89 07 48 8D 87 08 0F 00 00 48 89 85 ?? ?? ?? ?? C6 87 30 0F 00 00 00 C6 87 39 0F 00 00 00'
@@ -140,136 +157,129 @@ $levelVtable  = Resolve-VTable 'Level_vtable' $levelVtablePattern
 $localVtable  = Resolve-VTable 'LocalPlayer_vtable' $localVtablePattern
 
 if ($null -eq $clientVtable -or $null -eq $levelVtable) {
-    Write-Host "[-] Required vtable anchors were not found; stopping v3 chain validation." -ForegroundColor Red
+    Write-Host "[-] Required vtable anchors were not found; stopping." -ForegroundColor Red
     exit 2
 }
 
 $client = Find-LiveObject 'ClientInstance' $clientVtable
-$levelByVtable = Find-LiveObject 'Level' $levelVtable
+$level  = Find-LiveObject 'Level' $levelVtable
 
-if ($null -eq $client) {
-    Write-Host "[-] No ClientInstance object was found; make sure you are already inside a world." -ForegroundColor Red
+if ($null -eq $client -or $null -eq $level) {
+    Write-Host "[-] Need both live ClientInstance and Level. Enter a world and run again." -ForegroundColor Red
     exit 3
 }
 
-"`n===== ClientInstance vtable slots =====" | Add-Content $report
-Write-Host "`n[+] Dumping ClientInstance vslot 0x1E (getRegion / BlockSource candidate)" -ForegroundColor Cyan
+"`n===== ClientInstance virtual slots =====" | Add-Content $report
+Write-Host "`n[+] ClientInstance vslot 0x1E (getRegion / BlockSource candidate)" -ForegroundColor Cyan
 Run-Scanner @('--vslot', (Hex $clientVtable), '0x1E') | Out-Null
-Write-Host "[+] Dumping ClientInstance vslot 0x1F (getLocalPlayer candidate)" -ForegroundColor Cyan
+Write-Host "[+] ClientInstance vslot 0x1F (getLocalPlayer candidate)" -ForegroundColor Cyan
 Run-Scanner @('--vslot', (Hex $clientVtable), '0x1F') | Out-Null
 
-"`n===== ClientInstance known-field probe =====" | Add-Content $report
-Write-Host "`n[+] Reading current 1.26.x ClientInstance field candidates..." -ForegroundColor Cyan
-$mcGame       = Print-PtrField 'ClientInstance' $client 0x1A0 'MinecraftGame*'
-$minecraft    = Print-PtrField 'ClientInstance' $client 0x1A8 'Minecraft*'
-$levelRenderer= Print-PtrField 'ClientInstance' $client 0x1B8 'LevelRenderer*'
-$packetSender = Print-PtrField 'ClientInstance' $client 0x1C8 'PacketSender*'
-$inputHandler = Print-PtrField 'ClientInstance' $client 0x1D8 'InputHandler*'
+# First show why the copied Necromancer ClientInstance field offsets are not trusted on this exact build.
+"`n===== stale-field sanity check =====" | Add-Content $report
+Write-Host "`n[+] Testing public 1.26.x ClientInstance field candidates for readability..." -ForegroundColor Cyan
+$oldMcGame        = Print-PtrField 'ClientInstance' $client 0x1A0 'MinecraftGame* candidate'
+$oldMinecraft     = Print-PtrField 'ClientInstance' $client 0x1A8 'Minecraft* candidate'
+$oldLevelRenderer = Print-PtrField 'ClientInstance' $client 0x1B8 'LevelRenderer* candidate'
+$oldPacketSender  = Print-PtrField 'ClientInstance' $client 0x1C8 'PacketSender* candidate'
+$oldInputHandler  = Print-PtrField 'ClientInstance' $client 0x1D8 'InputHandler* candidate'
 
-Write-Host "`n[+] Dumping ClientInstance range 0x180..0x1FF" -ForegroundColor Cyan
-"`n===== ClientInstance +0x180 dump =====" | Add-Content $report
-Run-Scanner @('--dump', (Hex ($client + 0x180)), '128') | Out-Null
+# Reverse discovery starts from the independently verified live Level object.
+# Necromancer's current GameSession layout has Level* at +0x40 and two readiness checks at +0x28/+0x30.
+$gameSession = $null
+$levelRefs = Find-PointerRefs $level 256 'reverse chain: references to verified Level'
 
-# Current Necromancer 1.26.x layout:
-# Minecraft+0xC0 -> GameSession*
-# Minecraft+0xD8 -> Timer*
-# GameSession+0x28 == 1
-# GameSession+0x30 -> control block whose first byte == 1
-# GameSession+0x40 -> Level*
-$levelFromChain = $null
-if ($minecraft -and $minecraft -ne 0) {
-    "`n===== Minecraft -> GameSession -> Level chain =====" | Add-Content $report
-    Write-Host "`n[+] Following Minecraft -> GameSession -> Level..." -ForegroundColor Cyan
+"`n===== GameSession candidates from Level refs =====" | Add-Content $report
+Write-Host "`n[+] Testing Level references as GameSession+0x40 candidates..." -ForegroundColor Cyan
+foreach ($ref in $levelRefs) {
+    if ($ref -lt 0x40) { continue }
+    $candidate = [UInt64]($ref - 0x40)
+    $at40 = Read-RemotePtr ($candidate + 0x40)
+    if ($null -eq $at40 -or $at40 -ne $level) { continue }
 
-    $gameSession = Print-PtrField 'Minecraft' $minecraft 0xC0 'GameSession*'
-    $timer       = Print-PtrField 'Minecraft' $minecraft 0xD8 'Timer*'
+    $ready = Read-RemoteByte ($candidate + 0x28)
+    $control = Read-RemotePtr ($candidate + 0x30)
+    $controlReady = $null
+    if ($control -and $control -ne 0) { $controlReady = Read-RemoteByte $control }
 
-    if ($gameSession -and $gameSession -ne 0) {
-        $ready = Read-RemoteByte ($gameSession + 0x28)
-        $control = Read-RemotePtr ($gameSession + 0x30)
-        $levelFromChain = Read-RemotePtr ($gameSession + 0x40)
-
-        $readyText = if ($null -eq $ready) { '<read failed>' } else { $ready.ToString() }
-        $controlText = if ($null -eq $control) { '<read failed>' } else { Hex $control }
-        $levelText = if ($null -eq $levelFromChain) { '<read failed>' } else { Hex $levelFromChain }
-
-        $line1 = "[+] GameSession+0x28 ready byte = $readyText"
-        $line2 = "[+] GameSession+0x30 control block = $controlText"
-        $line3 = "[+] GameSession+0x40 Level* = $levelText"
-        Write-Host $line1; $line1 | Add-Content $report
-        Write-Host $line2; $line2 | Add-Content $report
-        Write-Host $line3; $line3 | Add-Content $report
-
-        if ($control -and $control -ne 0) {
-            $controlReady = Read-RemoteByte $control
-            $controlReadyText = if ($null -eq $controlReady) { '<read failed>' } else { $controlReady.ToString() }
-            $line = "[+] *controlBlock first byte = $controlReadyText"
-            Write-Host $line
-            $line | Add-Content $report
-        }
-
-        Write-Host "[+] Dumping first 128 bytes of GameSession" -ForegroundColor Cyan
-        "`n===== GameSession first 128 bytes =====" | Add-Content $report
-        Run-Scanner @('--dump', (Hex $gameSession), '128') | Out-Null
-    }
-
-    Write-Host "[+] Dumping first 256 bytes of Minecraft object" -ForegroundColor Cyan
-    "`n===== Minecraft first 256 bytes =====" | Add-Content $report
-    Run-Scanner @('--dump', (Hex $minecraft), '256') | Out-Null
-}
-
-"`n===== Level validation =====" | Add-Content $report
-if ($levelFromChain -and $levelFromChain -ne 0) {
-    $levelFirstPtr = Read-RemotePtr $levelFromChain
-    $line = "[+] Level from chain = $(Hex $levelFromChain), first pointer/vtable = $(if ($null -eq $levelFirstPtr) {'<read failed>'} else {Hex $levelFirstPtr})"
+    $line = "[+] GameSession candidate=$(Hex $candidate) ref=$(Hex $ref) ready=$ready control=$(if ($control) { Hex $control } else { '<none>' }) controlReady=$controlReady"
     Write-Host $line
     $line | Add-Content $report
 
-    if ($levelByVtable -and $levelFromChain -eq $levelByVtable) {
-        $line = '[+] PASS: Minecraft->GameSession->Level matches the independently located live Level object.'
-        Write-Host $line -ForegroundColor Green
-        $line | Add-Content $report
-    } elseif ($levelFirstPtr -and $levelFirstPtr -eq $levelVtable) {
-        $line = '[+] PASS: Level from the object chain has the resolved Level vtable.'
-        Write-Host $line -ForegroundColor Green
-        $line | Add-Content $report
-    } else {
-        $line = '[!] Level chain did not exactly match the independent vtable object; keep it as a candidate until reviewed.'
-        Write-Host $line -ForegroundColor Yellow
-        $line | Add-Content $report
+    if ($ready -eq 1 -and $control -and $controlReady -eq 1) {
+        $gameSession = $candidate
+        $pass = "[+] PASS: validated GameSession=$(Hex $gameSession) using +0x28/+0x30/+0x40 invariants."
+        Write-Host $pass -ForegroundColor Green
+        $pass | Add-Content $report
+        break
     }
+}
 
-    Write-Host "[+] Finding writable references to the live Level object..." -ForegroundColor Cyan
-    "`n===== references to Level object =====" | Add-Content $report
-    Run-Scanner @('--pointer', (Hex $levelFromChain), '--limit', '128') | Out-Null
+$minecraft = $null
+$minecraftRefInClient = $null
+$minecraftClientOffset = $null
 
-    Write-Host "[+] Dumping first 256 bytes of Level" -ForegroundColor Cyan
-    "`n===== Level first 256 bytes =====" | Add-Content $report
-    Run-Scanner @('--dump', (Hex $levelFromChain), '256') | Out-Null
+if ($gameSession) {
+    $sessionRefs = Find-PointerRefs $gameSession 256 'reverse chain: references to validated GameSession'
+    "`n===== Minecraft candidates from GameSession refs =====" | Add-Content $report
+    Write-Host "`n[+] Testing GameSession references as Minecraft+0xC0 candidates..." -ForegroundColor Cyan
+
+    foreach ($ref in $sessionRefs) {
+        if ($ref -lt 0xC0) { continue }
+        $candidate = [UInt64]($ref - 0xC0)
+        $atC0 = Read-RemotePtr ($candidate + 0xC0)
+        if ($null -eq $atC0 -or $atC0 -ne $gameSession) { continue }
+        if (-not (Is-ReadableAddress $candidate)) { continue }
+
+        $line = "[+] Minecraft candidate=$(Hex $candidate) via field ref=$(Hex $ref)"
+        Write-Host $line
+        $line | Add-Content $report
+
+        $candidateRefs = Find-PointerRefs $candidate 256 "references to Minecraft candidate $(Hex $candidate)"
+        foreach ($cr in $candidateRefs) {
+            if ($cr -ge $client -and $cr -lt ($client + 0x4000)) {
+                $off = [UInt64]($cr - $client)
+                $minecraft = $candidate
+                $minecraftRefInClient = $cr
+                $minecraftClientOffset = $off
+                $pass = "[+] PASS: Minecraft=$(Hex $minecraft) is referenced inside ClientInstance at +0x$('{0:X}' -f $off) (field=$(Hex $cr))."
+                Write-Host $pass -ForegroundColor Green
+                $pass | Add-Content $report
+                break
+            }
+        }
+        if ($minecraft) { break }
+    }
+}
+
+# If the exact GameSession readiness layout changed, still retain the strongest Level reference candidates for review.
+if (-not $gameSession) {
+    $warn = '[!] No strict GameSession candidate passed the current +0x28/+0x30/+0x40 validation.'
+    Write-Host $warn -ForegroundColor Yellow
+    $warn | Add-Content $report
 }
 
 if ($localVtable) {
-    Write-Host "`n[+] Checking for exact LocalPlayer-vtable objects again (informational only)..." -ForegroundColor Cyan
-    "`n===== LocalPlayer exact-vtable pointer scan =====" | Add-Content $report
-    Run-Scanner @('--pointer', (Hex $localVtable), '--limit', '64') | Out-Null
+    Find-PointerRefs $localVtable 64 'exact LocalPlayer-vtable objects (informational)' | Out-Null
 }
 
-Write-Host "`n[+] Finding references to the ClientInstance object itself..." -ForegroundColor Cyan
-"`n===== references to ClientInstance object =====" | Add-Content $report
-Run-Scanner @('--pointer', (Hex $client), '--limit', '128') | Out-Null
+Find-PointerRefs $client 256 'references to ClientInstance object' | Out-Null
 
-"`n===== v3 summary =====" | Add-Content $report
+"`n===== v4 summary =====" | Add-Content $report
 $summary = @(
     "ClientInstance_vtable=$(Hex $clientVtable)",
     "ClientInstance=$(Hex $client)",
     "Level_vtable=$(Hex $levelVtable)",
-    "Level_by_vtable=$(if ($levelByVtable) { Hex $levelByVtable } else { '<none>' })",
+    "Level=$(Hex $level)",
+    "LocalPlayer_vtable=$(if ($localVtable) { Hex $localVtable } else { '<none>' })",
+    "GameSession=$(if ($gameSession) { Hex $gameSession } else { '<none>' })",
     "Minecraft=$(if ($minecraft) { Hex $minecraft } else { '<none>' })",
-    "Level_from_chain=$(if ($levelFromChain) { Hex $levelFromChain } else { '<none>' })",
+    "Minecraft_ref_in_ClientInstance=$(if ($minecraftRefInClient) { Hex $minecraftRefInClient } else { '<none>' })",
+    "ClientInstance_Minecraft_offset=$(if ($null -ne $minecraftClientOffset) { '0x{0:X}' -f $minecraftClientOffset } else { '<none>' })",
     "ClientInstance_vslot_0x1E=getRegion/BlockSource candidate",
     "ClientInstance_vslot_0x1F=getLocalPlayer candidate"
 )
 $summary | ForEach-Object { Write-Host "[+] $_"; $_ | Add-Content $report }
 
 Write-Host "`n[+] Finished. Report: $report" -ForegroundColor Green
-Write-Host "Send scan-report-v26.45-v3.txt back. The key lines are the known-field probe, Minecraft->GameSession->Level chain, PASS/FAIL validation, and the summary."
+Write-Host "Send scan-report-v26.45-v4.txt back. The most important lines are PASS, GameSession, Minecraft and ClientInstance_Minecraft_offset."
