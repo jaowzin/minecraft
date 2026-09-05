@@ -1,8 +1,10 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -34,7 +36,7 @@ void openLog() {
 
     std::wstring path = tempPath;
     path += L"MineMod.log";
-    _wfopen_s(&g_log, path.c_str(), L"a+, ccs=UTF-8");
+    _wfopen_s(&g_log, path.c_str(), L"a+");
 }
 
 bool isWritableProtection(DWORD protect) {
@@ -170,11 +172,22 @@ std::vector<std::uintptr_t> findWritablePointers(std::uintptr_t target, std::siz
     return results;
 }
 
-template <typename R>
-R callVirtual(void* self, std::size_t index) {
+void* safeCallVirtual(void* self, std::size_t index, DWORD* exceptionCode) {
+    if (exceptionCode) *exceptionCode = 0;
+#if defined(_MSC_VER)
+    __try {
+        auto** table = *reinterpret_cast<void***>(self);
+        using Fn = void*(__fastcall*)(void*);
+        return reinterpret_cast<Fn>(table[index])(self);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (exceptionCode) *exceptionCode = GetExceptionCode();
+        return nullptr;
+    }
+#else
     auto** table = *reinterpret_cast<void***>(self);
-    using Fn = R(__fastcall*)(void*);
+    using Fn = void*(*)(void*);
     return reinterpret_cast<Fn>(table[index])(self);
+#endif
 }
 
 void probeClient() {
@@ -221,25 +234,17 @@ void probeClient() {
     logLine("[+] vslot 0x1E function=0x%llX", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(table[0x1E])));
     logLine("[+] vslot 0x1F function=0x%llX", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(table[0x1F])));
 
-    void* region = nullptr;
-    void* localPlayer = nullptr;
+    DWORD regionException = 0;
+    DWORD playerException = 0;
+    void* region = safeCallVirtual(client, 0x1E, &regionException);
+    void* localPlayer = safeCallVirtual(client, 0x1F, &playerException);
 
-#if defined(_MSC_VER)
-    __try {
-        region = callVirtual<void*>(client, 0x1E);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        logLine("[-] vslot 0x1E raised SEH exception 0x%08lX", GetExceptionCode());
+    if (regionException) {
+        logLine("[-] vslot 0x1E raised SEH exception 0x%08lX", regionException);
     }
-
-    __try {
-        localPlayer = callVirtual<void*>(client, 0x1F);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        logLine("[-] vslot 0x1F raised SEH exception 0x%08lX", GetExceptionCode());
+    if (playerException) {
+        logLine("[-] vslot 0x1F raised SEH exception 0x%08lX", playerException);
     }
-#else
-    region = callVirtual<void*>(client, 0x1E);
-    localPlayer = callVirtual<void*>(client, 0x1F);
-#endif
 
     logLine("[+] getRegion/BlockSource -> 0x%llX readable=%s",
         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(region)),
