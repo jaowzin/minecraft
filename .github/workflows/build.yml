@@ -1,4 +1,4 @@
-name: Build BedrockScanner
+name: Build MineMod
 
 on:
   push:
@@ -23,12 +23,14 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path package | Out-Null
           Copy-Item build/Release/BedrockScanner.exe package/BedrockScanner.exe
+          Copy-Item build/Release/MineMod.dll package/MineMod.dll
+          Copy-Item build/Release/MineModLoader.exe package/MineModLoader.exe
           Copy-Item tools/probe-v2645.ps1 package/probe-v2645.ps1
           Copy-Item README.md package/README.md
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: BedrockScanner-win64
+          name: MineMod-win64
           path: package/*
           if-no-files-found: error
