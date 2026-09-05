@@ -96,6 +96,15 @@ Replace-Literal -Path $blockEsp `
     -Old "void BlockESP::onRenderOverlay(Event&) {`r`n    if (!AntiObs::isActive()) return;" `
     -New "void BlockESP::onRenderOverlay(Event&) {"
 
+# The crash dump from Bedrock 1.26.45 lands in BlockESP::onRenderLayer while
+# MCDrawUtil::flush() lazily asks MaterialPtr::getUIColor() to create
+# "ui_fill_color". That path still depends on the removed RenderMaterialGroup.
+# The picker icons are cosmetic, so disable the native RenderLayer handoff entirely.
+# The XRay scan and projected D2D boxes do not depend on this listener.
+Replace-Literal -Path $blockEsp `
+    -Old '    Eventing::get().listen<RenderLayerEvent, &BlockESP::onRenderLayer>(this, 0, true);' `
+    -New '    // Mine Mod Slim: native block-picker item icon RenderLayer disabled on 1.26.45.'
+
 # The upstream scan identifies each block by dereferencing Block::legacyBlock and
 # reading BlockLegacy::namespacedId. The Block layout changed in 1.26.4501.0, so that
 # stale field is the likely access violation that happens immediately after adding a
@@ -165,6 +174,7 @@ Changes made by this patcher:
 - BlockESP renders through the normal D2D projected overlay instead of the native 3D material path.
 - Projection frame state is captured without enabling AntiObs.
 - Block scanning identifies selected states by catalog pointer instead of stale Block::legacyBlock layout.
+- Native BlockESP RenderLayer item-icon drawing is disabled because it still requires RenderMaterialGroup::common.
 - Default scan radius is reduced to 48 blocks while stabilizing Bedrock 1.26.4501.0.
 
 No anti-cheat bypass, stealth, Anti OBS, combat, movement or automation module is registered.
